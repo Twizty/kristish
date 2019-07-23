@@ -17,40 +17,43 @@ object decoder {
         fn: JsonValue => Either[Throwable, A]): JsonDecoder[A] =
       x => fn(x)
 
-    def wrapJsonEncoder[A](
-        name: String,
-        fn: PartialFunction[JsonValue, A]): JsonValue => Either[Throwable, A] =
+    def wrapJsonDecoderF[A](name: String)(
+        fn: PartialFunction[JsonValue, Either[Throwable, A]])
+      : JsonValue => Either[Throwable, A] =
       x => {
-        fn.andThen(_.asRight[Throwable])
-          .applyOrElse[JsonValue, Either[Throwable, A]](
-            x,
-            x1 => new Throwable(s"$x1 is not supported, expected $name").asLeft)
+        fn.applyOrElse[JsonValue, Either[Throwable, A]](
+          x,
+          x1 => new Throwable(s"$x1 is not supported, expected $name").asLeft)
       }
 
+    def wrapJsonDecoder[A](name: String)(
+        fn: PartialFunction[JsonValue, A]): JsonValue => Either[Throwable, A] =
+      wrapJsonDecoderF(name)(fn.andThen(_.asRight))
+
     implicit val stringDecoder: JsonDecoder[String] =
-      createDecoder(wrapJsonEncoder("string", {
+      createDecoder(wrapJsonDecoder("string") {
         case JsonString(str) => str
-      }))
+      })
 
     implicit val boolDecoder: JsonDecoder[Boolean] =
-      createDecoder(wrapJsonEncoder("bool", {
+      createDecoder(wrapJsonDecoder("bool") {
         case JsonBoolean(bool) => bool
-      }))
+      })
 
     implicit val intDecoder: JsonDecoder[Int] =
-      createDecoder(wrapJsonEncoder("int", {
+      createDecoder(wrapJsonDecoder("int") {
         case JsonNumber(int) => int.toInt
-      }))
+      })
 
     implicit val longDecoder: JsonDecoder[Long] =
-      createDecoder(wrapJsonEncoder("long", {
+      createDecoder(wrapJsonDecoder("long") {
         case JsonNumber(long) => long.toLong
-      }))
+      })
 
     implicit val doubleDecoder: JsonDecoder[Double] =
-      createDecoder(wrapJsonEncoder("double", {
+      createDecoder(wrapJsonDecoder("double") {
         case JsonNumber(double) => double
-      }))
+      })
 
     implicit def optionDecoder[A](
         implicit dec: JsonDecoder[A]): JsonDecoder[Option[A]] =
@@ -61,17 +64,15 @@ object decoder {
 
     implicit def listDecoder[A](
         implicit dec: JsonDecoder[A]): JsonDecoder[List[A]] = {
-      createDecoder {
+      createDecoder(wrapJsonDecoderF("array") {
         case JsonArray(items) => items.traverse(dec.decode)
-        case other            => new Throwable(s"unexpected $other, expected array").asLeft
-      }
+      })
     }
 
     implicit val hnilDecoder: JsonDecoder[HNil] =
-      createDecoder {
+      createDecoder(wrapJsonDecoderF("empty object") {
         case JsonObject(_) => HNil.asRight
-        case other         => new Throwable(s"expected empty object, got $other").asLeft
-      }
+      })
 
     implicit def hlistObjectDecoder[K <: Symbol, H, T <: HList](
         implicit
@@ -79,20 +80,22 @@ object decoder {
         hDecoder: Lazy[JsonDecoder[H]],
         tDecoder: JsonDecoder[T]
     ): JsonDecoder[FieldType[K, H] :: T] = {
-      createDecoder {
-        case JsonObject(map) if map.nonEmpty =>
-          val fieldName: String = witness.value.name
-          val e = map.getOrElse(fieldName, JsonNull)
+      createDecoder(
+        wrapJsonDecoderF("non empty object") {
+          case JsonObject(map) if map.nonEmpty =>
+            val fieldName: String = witness.value.name
+            val e = map.getOrElse(fieldName, JsonNull)
 
-          for {
-            head <- hDecoder.value.decode(e)
-            tail <- tDecoder.decode(JsonObject(map))
-          } yield field[K](head) :: tail
-      }
+            for {
+              head <- hDecoder.value.decode(e)
+              tail <- tDecoder.decode(JsonObject(map))
+            } yield field[K](head) :: tail
+        }
+      )
     }
 
     implicit val cnilObjectDecoder: JsonDecoder[CNil] =
-      createDecoder(_ => throw new Exception("Inconceivable!"))
+      createDecoder(_ => new Throwable("unexpected CNil").asLeft)
 
     implicit def coproductObjectDecoder[K <: Symbol, H, T <: Coproduct](
         implicit
